@@ -1,0 +1,491 @@
+#!/bin/ksh
+##################################################################
+# Name:         top_sql_report.ksh <DB_NAME>					
+# Purpose:      generates report for top sqls from last 24 Hrs
+# Author: 	    Adithya Sirimalla
+# Change Log:   09/18/2019        Initial
+###################################################################
+# Default minimum PATH
+PATH=$PATH:/usr/bin:/bin
+export PATH
+##########  Variables #############################################
+export USER=CAFE        # App username prefix to find SQLs
+export MAILOPT=3        # 1 -> Inline EMail Report (sendmail)
+						# 2 --> Inline and Attachment Report Email (sendmail and uuencode) 
+						# 3 --> Only Attacchment Report Email (mailx)
+                        # Option 2 wont work if unix utility "uuencode" not installed
+export MAILFROM="DBMonitor@abc.com"
+export MAILTO="dba@abc.com"
+#-----------------------------------------------------------------
+export DB_NAME=$1
+export REPORT_HEAD1="$DB_NAME - Top SQL Report Froma Last 24 Hours "
+export MAIL_SUBJECT="$DB_NAME - Database Long Running Queries Report"
+export BODY_FILE="$DB_NAME-BODY.html"
+export BODY_MAILOPT3="body_mailopt3.txt"
+export ATTACH_FILE="$DB_NAME-SQL_TRENDING.html"
+export DT=`date`
+export BODY_SIG1="From"
+export BODY_SIG2="DBA Team"
+#------------------------------------------------------------------
+echo "$DB_NAME - Database Long Running Queries Trending Report" >body_mailopt3.txt
+echo "Report generated @ $DT on DB:$DB_NAME" >>body_mailopt3.txt
+echo " Attachment Contain SQL Trending Report" >>body_mailopt3.txt
+echo " " >>body_mailopt3.txt
+echo "From" >>body_mailopt3.txt
+echo "DBA Team" >>body_mailopt3.txt
+###################################################################
+if [ -r /var/opt/oracle/oratab ]            #Checking oratab file
+then
+	ORATAB=/var/opt/oracle/oratab
+elif [ -r /etc/oratab ]
+then
+	ORATAB=/etc/oratab
+else
+	echo "Oracle Not Installed or Not Configured, ORATAB file not found!"
+	exit 0
+fi
+
+CountI=0
+if [ ${#} -eq 1 ]
+then
+	DBName=$1
+else
+	echo "Pass the DB instance name!!"
+	exit 0
+fi
+export host=`hostname`
+nodenum=`olsnodes -n | grep $host | cut -f2 `
+InstName=$DBName$nodenum
+ProcCount=0
+	Procs=`ps -fe 2>/dev/null | cut -c1-132 | sed -e 's/ *$//' | grep -v grep | \
+    egrep "ora_pmo._${InstName}\$|ora_dbw._${InstName}\$|ora_lgw._${InstName}\$|ora_smo._${InstName}"'$'`
+    for Proc in pmo dbw lgw smo
+    do
+		Result=`echo ${Procs} | grep "ora_${Proc}._${InstName}" 2>&1`
+        if [ -n "${Result}" ]
+        then
+			ProcCount=`expr ${ProcCount} + 1`
+        fi
+    done
+if [ ${ProcCount} -ge 4 ]
+then
+	export ORACLE_SID=$InstName
+	export ORACLE_HOME=`grep -wi $DBName /etc/oratab | cut -f2 -d:`
+	PATH=$PATH:$ORACLE_HOME/bin
+else
+	echo "$DBName is not available or running"
+	exit 0
+fi
+# -------------------------------------------------------------------------------------------------------
+sqlplus -s / as sysdba << EOF
+set heading off
+set feedback off
+alter session set nls_date_format='DD-MON-YYYY HH:MI AM'; 
+set markup html on spool on entmap off -
+HEAD '<title> SQL REPORT</title> -
+     <style type="text/css"> -
+        table { background: #f2f2f2; font-size: 75%; } -
+        th { color:#FFFFFF; background: #000080;  } -
+	tr { height:40; } -
+        td { text-align:left } -
+     </style>' 
+SPOOL $BODY_FILE
+SET LINESIZE 500
+SET PAGESIZE 1000
+col COMMAND_TYPE for a15 
+set markup html off
+
+select '<span style="color:#000000;font-size: 175%; text-align:center; display:block;overflow:auto">' || to_char(titl) || '</span>'
+from (select '$REPORT_HEAD1' as titl from dual);
+
+select '<span style="color:#000000;font-size: 175%; text-align:center; display:block;overflow:auto">' || to_char(lns) || '</span>'
+from (select '----------------------------------------------------------------------------' as lns from dual);
+
+select '<span style="color:#800000;font-size: 125%; text-align:center; display:block;overflow:auto">' || to_char(gendate) || '</span>'
+from (select 'Report generated @ ' || SYSDATE || ' EST on DB:$DB_NAME' as gendate from dual);
+
+set markup html on 
+set heading on
+select 
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(rownum) || '</span>'  as S_No,
+'<span style="color:#000000;font-size: 150%;text-align:center;display:block;overflow:auto">' || to_char(command_type) || '</span>' as Command_Type,
+'<span style="color:#FF0000;font-size: 150%;text-align:center;display:block;overflow:auto">' || to_char(Total) || '</span>'  as Total,
+case when Blk1 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk1) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk1) || '</span>'
+       end  as  "<1s",
+case when Blk2 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk2) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk2) || '</span>'
+       end  as "1s to 5s",
+case when Blk3 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk3) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk3) || '</span>'
+       end  as "5s to 10s",
+case when Blk4 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk4) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk4) || '</span>'
+       end  as "10s to 30s",
+case when Blk5 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk5) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk5) || '</span>'
+       end  as "30s to 60s",
+case when Blk6 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk6) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk6) || '</span>'
+       end  as "60s to 90s",
+case when Blk7 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk7) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk7) || '</span>'
+       end  as "90s to 120s",
+case when Blk8 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk8) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk8) || '</span>'
+       end  as ">120s"
+from (
+SELECT command_type, 
+count(*) as Total,
+sum(case when ELAP_SEC between 0.00 and 0.99 then 1 else 0 end) as Blk1,
+sum(case when ELAP_SEC between 1.00 and 4.99 then 1 else 0 end) Blk2 ,
+sum(case when ELAP_SEC between 5.00 and 9.99 then 1 else 0 end) Blk3,
+sum(case when ELAP_SEC between 10.00 and 29.99 then 1 else 0 end) Blk4,
+sum(case when ELAP_SEC between 30.00 and 59.99 then 1 else 0 end) Blk5,
+sum(case when ELAP_SEC between 60.00 and 89.99 then 1 else 0 end) Blk6,
+sum(case when ELAP_SEC between 90.00 and 119.99 then 1 else 0 end) Blk7,
+sum(case when ELAP_SEC between 120.00 and 1000000.99 then 1 else 0 end) as Blk8
+FROM (
+select 
+   sql_id,
+  (case command_type
+  when 1 then 'CREATE TABLE'
+  when 2 then 'INSERT'
+  when 3 then 'SELECT'
+  when 6 then 'UPDATE'
+  when 7 then 'DELETE'
+  when 9 then 'Create Index'
+  when 11 then 'ALTER INDEX'
+  when 25 then 'ALTER PROCEDURE'
+  when 26 then 'LOCK Table'
+  when 42 then 'ALTER_SESSION'
+  when 44 then 'COMMIT'
+  when 45 then 'Rollback'
+  when 46 then 'Savepoint'
+  when 47 then 'PL/SQL BLOCK'
+  when 48 then 'Set transaction'
+  when 50 then 'Explain'
+  when 62 then 'Analyze table'
+  when 90 then 'Set Constraints'
+  when 170 then 'Call'
+  when 189 then 'Merge'
+  end ) Command_Type,
+  executions,
+  ELAPSED_TIME_delta,
+  ELAP_SEC,
+  pio_per_exec,
+  lio_per_exec
+  from (
+select
+ q.sql_id,H.command_type
+, sum(q.EXECUTIONS_DELTA) executions
+, round(sum(ELAPSED_TIME_delta)/1000000,2) ELAPSED_TIME_delta
+, round((sum(ELAPSED_TIME_delta)/greatest(sum(executions_delta),1)/1000000),2) ELAP_SEC
+, round(sum(DISK_READS_delta)/greatest(sum(executions_delta),1),2) pio_per_exec
+, round(sum(BUFFER_GETS_delta)/greatest(sum(executions_delta),1),2) lio_per_exec
+from dba_hist_sqlstat q, dba_hist_snapshot s, dba_hist_sqltext H
+where  s.snap_id = q.snap_id
+and s.begin_interval_time>=sysdate-1
+--and q.Module='JDBC Thin Client'
+and q.parsing_schema_name like '$USER%'
+and s.dbid = q.dbid
+and s.instance_number = q.instance_number
+and q.dbid=h.dbid
+and q.sql_id=H.sql_id
+group by q.sql_id,h.command_type
+)
+) GROUP BY Command_Type ORDER BY 1
+);
+
+set heading off
+set markup html off
+
+select '$BODY_SIG1' from dual;
+select '$BODY_SIG2' from dual;
+
+set markup html on
+
+spool off
+
+EXIT;
+EOF
+
+# -------------------------------------------------------------------------------------------------------
+
+sqlplus -s / as sysdba << EOF
+set heading off
+set feedback off
+alter session set nls_date_format='DD-MON-YYYY HH:MI AM'; 
+set markup html on spool on entmap off -
+HEAD '<title> TOP SQL REPORT</title> -
+     <style type="text/css"> -
+        table { background: #f2f2f2; font-size: 75%; } -
+        th { color:#FFFFFF; background: #000080;  } -
+	tr { height:40; } -
+        td { text-align:left } -
+     </style>' 
+SPOOL $ATTACH_FILE
+SET LINESIZE 500
+SET PAGESIZE 1000
+col COMMAND_TYPE for a15 
+set markup html off
+
+select '<span style="color:#000000;font-size: 175%; text-align:center; display:block;overflow:auto">' || to_char(titl) || '</span>'
+from (select '$REPORT_HEAD1' as titl from dual);
+
+select '<span style="color:#000000;font-size: 175%; text-align:center; display:block;overflow:auto">' || to_char(lns) || '</span>'
+from (select '----------------------------------------------------------------------------' as lns from dual);
+
+select '<span style="color:#800000;font-size: 125%; text-align:center; display:block;overflow:auto">' || to_char(gendate) || '</span>'
+from (select 'Report generated @ ' || SYSDATE || ' EST on DB:$DB_NAME' as gendate from dual);
+
+set markup html on 
+set heading on
+select 
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(rownum) || '</span>'  as S_No,
+'<span style="color:#000000;font-size: 150%;text-align:center;display:block;overflow:auto">' || to_char(command_type) || '</span>' as Command_Type,
+'<span style="color:#FF0000;font-size: 150%;text-align:center;display:block;overflow:auto">' || to_char(Total) || '</span>'  as Total,
+case when Blk1 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk1) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk1) || '</span>'
+       end  as  "<1s",
+case when Blk2 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk2) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk2) || '</span>'
+       end  as "1s to 5s",
+case when Blk3 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk3) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk3) || '</span>'
+       end  as "5s to 10s",
+case when Blk4 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk4) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk4) || '</span>'
+       end  as "10s to 30s",
+case when Blk5 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk5) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk5) || '</span>'
+       end  as "30s to 60s",
+case when Blk6 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk6) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk6) || '</span>'
+       end  as "60s to 90s",
+case when Blk7 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk7) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk7) || '</span>'
+       end  as "90s to 120s",
+case when Blk8 > 0 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block; overflow:auto">' || to_char(Blk8) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block; overflow:auto">' || to_char(Blk8) || '</span>'
+       end  as ">120s"
+from (
+SELECT command_type, 
+count(*) as Total,
+sum(case when ELAP_SEC between 0.00 and 0.99 then 1 else 0 end) as Blk1,
+sum(case when ELAP_SEC between 1.00 and 4.99 then 1 else 0 end) Blk2 ,
+sum(case when ELAP_SEC between 5.00 and 9.99 then 1 else 0 end) Blk3,
+sum(case when ELAP_SEC between 10.00 and 29.99 then 1 else 0 end) Blk4,
+sum(case when ELAP_SEC between 30.00 and 59.99 then 1 else 0 end) Blk5,
+sum(case when ELAP_SEC between 60.00 and 89.99 then 1 else 0 end) Blk6,
+sum(case when ELAP_SEC between 90.00 and 119.99 then 1 else 0 end) Blk7,
+sum(case when ELAP_SEC between 120.00 and 1000000.99 then 1 else 0 end) as Blk8
+FROM (
+select 
+   sql_id,
+  (case command_type
+  when 1 then 'CREATE TABLE'
+  when 2 then 'INSERT'
+  when 3 then 'SELECT'
+  when 6 then 'UPDATE'
+  when 7 then 'DELETE'
+  when 9 then 'Create Index'
+  when 11 then 'ALTER INDEX'
+  when 25 then 'ALTER PROCEDURE'
+  when 26 then 'LOCK Table'
+  when 42 then 'ALTER_SESSION'
+  when 44 then 'COMMIT'
+  when 45 then 'Rollback'
+  when 46 then 'Savepoint'
+  when 47 then 'PL/SQL BLOCK'
+  when 48 then 'Set transaction'
+  when 50 then 'Explain'
+  when 62 then 'Analyze table'
+  when 90 then 'Set Constraints'
+  when 170 then 'Call'
+  when 189 then 'Merge'
+  end ) Command_Type,
+  executions,
+  ELAPSED_TIME_delta,
+  ELAP_SEC,
+  pio_per_exec,
+  lio_per_exec
+  from (
+select
+ q.sql_id,H.command_type
+, sum(q.EXECUTIONS_DELTA) executions
+, round(sum(ELAPSED_TIME_delta)/1000000,2) ELAPSED_TIME_delta
+, round((sum(ELAPSED_TIME_delta)/greatest(sum(executions_delta),1)/1000000),2) ELAP_SEC
+, round(sum(DISK_READS_delta)/greatest(sum(executions_delta),1),2) pio_per_exec
+, round(sum(BUFFER_GETS_delta)/greatest(sum(executions_delta),1),2) lio_per_exec
+from dba_hist_sqlstat q, dba_hist_snapshot s, dba_hist_sqltext H
+where  s.snap_id = q.snap_id
+and s.begin_interval_time>=sysdate-1
+--and q.Module='JDBC Thin Client'
+and q.parsing_schema_name like '$USER%'
+and s.dbid = q.dbid
+and s.instance_number = q.instance_number
+and q.dbid=h.dbid
+and q.sql_id=H.sql_id
+group by q.sql_id,h.command_type
+)
+) GROUP BY Command_Type ORDER BY 1
+);
+# --------------------------------------------------------------------------------------------------------------------------
+
+set heading off
+set markup html off
+select '<span style="color:#000000;font-size: 100%; text-align:center; display:block;overflow:auto">' || to_char(lns2) || '</span>'
+from (select '---------------------------------------------------------------------------------------------------------------------------------------' as lns2 from dual);
+
+select '<span style="color:#000000;font-size: 175%; text-align:center; display:block;overflow:auto">' || to_char(ttl) || '</span>'
+from (select 'Long Running Queries - Details' as ttl from dual);
+
+
+set markup html on 
+set heading on
+
+set long 100000
+col sql_text for a25
+select 
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(rownum) || '</span>'  as S_No,
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(sql_id) || '</span>'  as sql_id,
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(Command_Type) || '</span>'  as Command_Type ,
+sql_text,
+case when ELAP_SEC > 120 then
+         '<span style="color:#FF0000;font-size: 150%;text-align:center;display:block;overflow:auto">' || to_char(ELAP_SEC) || '</span>'
+       else
+         '<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(ELAP_SEC) || '</span>'
+       end as AVG_ELAPSED_SEC ,
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(TOTAL_EXECUTIONS) || '</span>' as TOTAL_EXECUTIONS,
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(pio_per_exec) || '</span>' as DISK_READS_AVG,
+'<span style="color:#000000;font-size: 100%;text-align:center;display:block;overflow:auto">' || to_char(lio_per_exec) || '</span>' as  BUFFER_GETS_AVG
+from (
+select 
+   sql_id,
+  (case command_type
+  when 1 then 'CREATE TABLE'
+  when 2 then 'INSERT'
+  when 3 then 'SELECT'
+  when 6 then 'UPDATE'
+  when 7 then 'DELETE'
+  when 9 then 'Create Index'
+  when 11 then 'ALTER INDEX'
+  when 25 then 'ALTER PROCEDURE'
+  when 26 then 'LOCK Table'
+  when 42 then 'ALTER_SESSION'
+  when 44 then 'COMMIT'
+  when 45 then 'Rollback'
+  when 46 then 'Savepoint'
+  when 47 then 'PL/SQL BLOCK'
+  when 48 then 'Set transaction'
+  when 50 then 'Explain'
+  when 62 then 'Analyze table'
+  when 90 then 'Set Constraints'
+  when 170 then 'Call'
+  when 189 then 'Merge'
+  end ) Command_Type,
+  (select sql_text from dba_hist_sqltext where sql_id=A.sql_id) sql_text,
+  ELAP_SEC ,
+  executions TOTAL_EXECUTIONS,
+   pio_per_exec,
+  lio_per_exec
+  from (
+select
+ q.sql_id,H.command_type
+, sum(q.EXECUTIONS_DELTA) executions
+, round(sum(DISK_READS_delta)/greatest(sum(executions_delta),1),1) pio_per_exec
+, round(sum(BUFFER_GETS_delta)/greatest(sum(executions_delta),1),1) lio_per_exec
+, round(sum(ELAPSED_TIME_delta),1) ELAPSED_TIME_delta
+, round((sum(ELAPSED_TIME_delta)/greatest(sum(executions_delta),1)/1000000),2) ELAP_SEC
+from dba_hist_sqlstat q, dba_hist_snapshot s, dba_hist_sqltext H
+where  s.snap_id = q.snap_id
+and s.begin_interval_time>=sysdate-1
+--and q.Module='JDBC Thin Client'
+and q.parsing_schema_name like '$USER%'
+and s.dbid = q.dbid
+and s.instance_number = q.instance_number
+and q.dbid=h.dbid
+and q.sql_id=H.sql_id
+group by q.sql_id,h.command_type
+) A   order by 4 desc); 
+
+spool off
+
+EXIT;
+EOF
+
+###########################################################################
+
+if [ $MAILOPT -eq 1 ]
+then
+	(
+	echo "From: $MAILFROM"
+	echo "To: $MAILTO"
+	echo "Subject: $MAIL_SUBJECT"
+	echo "MIME-Version: 1.0"
+	echo "Content-Type: text/html"
+	echo "Content-Disposition: inline"
+	cat $ATTACH_FILE
+	) | /usr/sbin/sendmail $MAILTO
+
+fi
+
+if [ $MAILOPT -eq 2 ]
+then
+	(
+	echo "From: $MAILFROM"
+	echo "To: $MAILTO"
+	echo "Subject: $MAIL_SUBJECT"
+	echo "MIME-Version: 1.0"
+	echo "Content-Type: multipart/mixed; boundary=\"-$MAILPART\""
+	echo "---$MAILPART"
+	echo "Content-Type: text/html"
+	echo "Content-Disposition: inline"
+	cat $BODY_FILE
+	echo "---$MAILPART"
+	echo 'Content-Type: text/html; name="'$(basename $ATTACH_FILE)'"'
+	echo "Content-Transfer-Encoding: base64"
+	echo 'Content-Disposition: attachment; filename="'$(basename $ATTACH_FILE)'"'
+	uuencode -m $ATTACH_FILE $(basename $ATTACH_FILE)
+	echo "---$MAILPART--"
+	) | /usr/sbin/sendmail $MAILTO
+fi
+
+if [ $MAILOPT -eq 3 ]
+then
+	cat $BODY_MAILOPT3 | mailx -s "$MAIL_SUBJECT" -a $ATTACH_FILE -r $MAILFROM $MAILTO
+fi
+
